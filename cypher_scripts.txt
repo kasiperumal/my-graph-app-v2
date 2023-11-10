@@ -1,0 +1,282 @@
+Cleanup cypher commands:
+1.MATCH (n) DETACH DELETE n;
+2.SHOW INDEXES;
+3.SHOW CONSTRAINTS;
+4.CALL apoc.schema.assert({}, {}); 
+5.Nodes all property deletion,
+MATCH (n) 
+SET n = {}
+RETURN COUNT(*) as nodesUpdated;
+6.Relationship all property deletion,
+MATCH ()-[r]-() 
+SET r = {}
+RETURN COUNT(*) as relationshipsUpdated;
+
+Query all nodes and relationship in Neo4j browser:
+MATCH p=()-->() RETURN p LIMIT 25
+
+--------
+
+1. Customer, HAS_SESSION, Session
+
+CustomerSession.csv:
+ecn,session_id,status,timestamp
+12345,abc123,Successful,2023-10-03 10:00:00
+12345,def456,Failed,2023-10-03 11:00:00
+
+LOAD CSV WITH HEADERS FROM 'file:///CustomerSession.csv' AS row
+
+// Parse timestamp string into DateTime type
+WITH row, datetime(row.timestamp) AS parsedTimestamp
+
+MERGE (c:Customer {ecn: row.ecn})
+ON CREATE SET c.title = 'Customer:' + row.ecn
+
+CREATE (s:Session {session_id: row.session_id, status: row.status, timestamp: parsedTimestamp})
+SET s.title = 'Session:' + row.session_id
+
+CREATE (c)-[:HAS_SESSION]->(s);
+
+// Constraints and Indexes for Customer Node
+CREATE CONSTRAINT FOR (c:Customer) REQUIRE c.ecn IS UNIQUE;
+
+// Constraints and Indexes for Session Node
+CREATE CONSTRAINT FOR (s:Session) REQUIRE s.session_id IS UNIQUE;
+// Compound indexes
+CREATE INDEX FOR (s:Session) ON (s.ecn, s.status);
+CREATE INDEX FOR (s:Session) ON (s.ecn, s.timestamp);
+
+
+2.LoginApp, HAS_COMPONENT
+
+LoginApp.csv:
+session_id,type,device,deviceType,pre_auth_identifier,pre_auth_status,interdiction_result,event_name,event_status,error_reason,error_category
+abc123,LoginApp,Browser,,AVA,ALLOW,BLOCK,USERPWD_LOGIN,SUCCESS,,
+def456,LoginApp,Phone,Android,AVA,ALLOW,INTERDICT,BIOMETRIC_LOGIN,FAILED,FFIEC block page,Fraud Block
+
+// Load the CSV file
+LOAD CSV WITH HEADERS FROM 'file:///LoginApp.csv' AS row
+
+// Create or find the corresponding session node
+MATCH (s:Session {session_id: row.session_id})
+
+// Create LoginApp Component node, set the title property to "LoginApp", and associate it with the session
+CREATE (c:Component:LoginApp {
+    title: 'LoginApp', 
+    session_id: row.session_id, 
+    device: row.device, 
+    deviceType: row.deviceType,
+    pre_auth_identifier: row.pre_auth_identifier,
+    pre_auth_status: row.pre_auth_status,
+    interdiction_result: row.interdiction_result,
+    event_name: row.event_name,
+    event_status: row.event_status,
+    error_reason: COALESCE(row.error_reason, ''), // To handle possible null values
+    error_category: COALESCE(row.error_category, '') // To handle possible null values
+})
+
+// Create the relationship between Session and Component
+CREATE (s)-[:HAS_COMPONENT]->(c);
+
+3.LDAP, APS, SIMS, HAS_COMPONENT
+
+OtherComponents.csv:
+session_id,type
+abc123,LDAP
+abc123,APS
+abc123,SIMS
+def456,LDAP
+def456,APS
+def456,SIMS
+
+LOAD CSV WITH HEADERS FROM 'file:///OtherComponents.csv' AS row
+
+// Match the corresponding session node
+MATCH (s:Session {session_id: row.session_id})
+
+// Determine which type of node to create based on the 'type' column in the CSV
+WITH s, row, 
+CASE row.type 
+    WHEN 'LDAP' THEN ['Component', 'LDAP']
+    WHEN 'APS' THEN ['Component', 'APS']
+    WHEN 'SIMS' THEN ['Component', 'SIMS']
+    ELSE ['Unknown'] 
+END AS labelsList
+
+// Extract the label value from the labelsList to set the title value
+WITH s, row, labelsList, labelsList[1] AS title
+
+// Create the node of the determined type, set the title, and associate it with the session
+CALL apoc.create.node(labelsList, {session_id: row.session_id, title: title}) YIELD node as c
+CREATE (s)-[:HAS_COMPONENT]->(c);
+
+// Add the recommended_action property with the value "BLOCK" to nodes of type 'SIMS'
+MATCH (c:Component {title: 'SIMS'})
+SET c.recommended_action = 'BLOCK';
+
+// Constraints and Indexes for Component Node
+CREATE INDEX FOR (c:Component) ON (c.session_id);
+
+4. AUTHC, HAS_SUBCOMPONENT
+
+AUTHC.csv:
+type,component_name,session_id,recommended_action
+AuthC,SIMS,abc123,ALLOW
+AuthC,SIMS,def456,BLOCK
+
+LOAD CSV WITH HEADERS FROM 'file:///AUTHC.csv' AS line
+
+MERGE (a:SubComponent:AuthC {session_id: line.session_id, recommended_action: line.recommended_action, title: "AuthC", component: "SIMS"})
+
+// Ensure there's a SIMS component for each SPS subcomponent
+MERGE (sims:Component:SIMS {session_id: line.session_id})
+MERGE (sims)-[:HAS_SUBCOMPONENT]->(a);
+
+5. SCC, HAS_SUBCOMPONENT
+SCC.csv:
+type,component_name,session_id,password_status,ceea_preference
+SCC,SIMS,abc123,ENHANCED,NO_ENHANCED_AUTH
+SCC,SIMS,def456,ENHANCED,NO_ENHANCED_AUTH
+
+LOAD CSV WITH HEADERS FROM 'file:///SCC.csv' AS line
+
+MERGE (scc:SubComponent:SCC {session_id: line.session_id, password_status: line.password_status, ceea_preference: line.ceea_preference, title: "SCC", component: "SIMS"})
+
+// Ensure there's a SIMS component for each SCC subcomponent
+MERGE (sims:Component:SIMS {session_id: line.session_id})
+MERGE (sims)-[:HAS_SUBCOMPONENT]->(scc);
+
+
+6. SDI, HAS_SUBCOMPONENT
+SDI.csv:
+type,component_name,session_id,device_tag,device_id,device_id_status,device_bound,device_linked,device_bound_method,device_linked_method
+SDI,SIMS,abc123,4d79041f-a667-46f8-8c5d-4c0f67c4b1b2,1,DEVICE_IDENTIFIED_WITH_VALID_TAG,true,null,OTP,null
+SDI,SIMS,def456,1a26075f-c4f1-4a90-9cdb-8e98764a5d70,2,DEVICE_IDENTIFIED_WITH_VALID_TAG,false,null,OTP,null
+
+LOAD CSV WITH HEADERS FROM 'file:///SDI.csv' AS line
+
+// Create the SDI subcomponent node
+MERGE (sdi:SubComponent:SDI {
+title: "SDI",
+component: "SIMS",
+session_id: line.session_id,
+device_tag: line.device_tag,
+device_id: line.device_id,
+device_id_status: line.device_id_status,
+device_bound: toBoolean(line.device_bound),
+device_linked: CASE WHEN line.device_linked IS NOT NULL THEN toBoolean(line.device_linked) ELSE null END,
+device_bound_method: line.device_bound_method,
+device_linked_method: line.device_linked_method
+})
+
+// Ensure there's a SIMS component for each SPS subcomponent
+MERGE (sims:Component:SIMS {session_id: line.session_id})
+
+// Create relationship between SIMS and SDI
+MERGE (sims)-[:HAS_SUBCOMPONENT]->(sdi);
+
+
+
+7. SPS, HAS_SUBCOMPONENT
+SPS.csv:
+type,component_name,session_id,control_point,recommended_action,risk_rule_list
+SPS,SIMS,abc123,LOGIN,ALLOW,
+SPS,SIMS,def456,LOGIN,BLOCK,"RISK_33,IS_LOCKOUT"
+
+LOAD CSV WITH HEADERS FROM 'file:///SPS.csv' AS line
+
+// Create the SPS subcomponent node
+MERGE (sps:SubComponent:SPS {
+title: "SPS",
+component: "SIMS",
+session_id: line.session_id,
+control_point: line.control_point,
+recommended_action: line.recommended_action,
+risk_rule_list: split(CASE WHEN line.risk_rule_list IS NOT NULL THEN line.risk_rule_list ELSE "" END, ",")
+})
+
+// Ensure there's a SIMS component for each SPS subcomponent
+MERGE (sims:Component:SIMS {session_id: line.session_id})
+
+// Create relationship between SIMS and SPS
+MERGE (sims)-[:HAS_SUBCOMPONENT]->(sps);
+
+// Constraints and Indexes for SubComponent Node
+CREATE INDEX FOR (sps:SubComponent) ON (sps.session_id, sps.component);
+
+8. SENDS_REQUEST_TO,SENDS_RESPONSE_TO (FOR COMPONENT)
+ComponentRequestResponse.csv:
+session_id,source_component,target_component,api_name,msg
+abc123,LoginApp,LDAP,validateCredentials,Request
+abc123,LDAP,LoginApp,validateCredentials,Response
+abc123,LoginApp,APS,getOnlineAccess,Request
+abc123,APS,LoginApp,getOnlineAccess,Response
+abc123,LoginApp,SIMS,evaluateLoginRisk,Request
+abc123,SIMS,LoginApp,evaluateLoginRisk,Response
+def456,LoginApp,LDAP,validateCredentials,Request
+def456,LDAP,LoginApp,validateCredentials,Response
+def456,LoginApp,APS,getOnlineAccess,Request
+def456,APS,LoginApp,getOnlineAccess,Response
+def456,LoginApp,SIMS,evaluateLoginRisk,Request
+def456,SIMS,LoginApp,evaluateLoginRisk,Response
+
+LOAD CSV WITH HEADERS FROM 'file:///ComponentRequestResponse.csv' AS row
+WITH row WHERE row.msg = "Request"
+MATCH (source:Component {session_id: row.session_id, title: row.source_component})
+MATCH (target:Component {session_id: row.session_id, title: row.target_component})
+MERGE (source)-[:SENDS_REQUEST_TO {
+    msg: row.msg,
+    source_component: row.source_component,
+    target_component: row.target_component,
+    api_name: row.api_name
+}]->(target);
+
+LOAD CSV WITH HEADERS FROM 'file:///ComponentRequestResponse.csv' AS row
+WITH row WHERE row.msg = "Response"
+MATCH (source:Component {session_id: row.session_id, title: row.source_component})
+MATCH (target:Component {session_id: row.session_id, title: row.target_component})
+MERGE (source)-[:SENDS_RESPONSE_TO {
+    msg: row.msg,
+    source_component: row.source_component,
+    target_component: row.target_component,
+    api_name: row.api_name
+}]->(target);
+
+9. SENDS_REQUEST_TO,SENDS_RESPONSE_TO (FOR SUBCOMPONENT)
+SubcomponentRequestResponse.csv:
+session_id,source_subcomponent,target_subcomponent,api_name,msg
+abc123,AuthC,SCC,remediation,Request
+abc123,SCC,AuthC,remediation,Response
+abc123,AuthC,SDI,deviceIdentificationAndRecovery,Request
+abc123,SDI,AuthC,deviceIdentificationAndRecovery,Response
+abc123,AuthC,SPS,evaluateRiskRule,Request
+abc123,SPS,AuthC,evaluateRiskRule,Response
+def456,AuthC,SCC,remediation,Request
+def456,SCC,AuthC,remediation,Response
+def456,AuthC,SDI,deviceIdentificationAndRecovery,Request
+def456,SDI,AuthC,deviceIdentificationAndRecovery,Response
+def456,AuthC,SPS,evaluateRiskRule,Request
+def456,SPS,AuthC,evaluateRiskRule,Response
+
+
+LOAD CSV WITH HEADERS FROM 'file:///SubcomponentRequestResponse.csv' AS row
+WITH row WHERE row.msg = "Request"
+MATCH (source:SubComponent {session_id: row.session_id, title: row.source_subcomponent})
+MATCH (target:SubComponent {session_id: row.session_id, title: row.target_subcomponent})
+MERGE (source)-[:SENDS_REQUEST_TO {
+    msg: row.msg,
+    source_subcomponent: row.source_subcomponent,
+    target_subcomponent: row.target_subcomponent,
+    api_name: row.api_name
+}]->(target);
+
+LOAD CSV WITH HEADERS FROM 'file:///SubcomponentRequestResponse.csv' AS row
+WITH row WHERE row.msg = "Response"
+MATCH (source:SubComponent {session_id: row.session_id, title: row.source_subcomponent})
+MATCH (target:SubComponent {session_id: row.session_id, title: row.target_subcomponent})
+MERGE (source)-[:SENDS_RESPONSE_TO {
+    msg: row.msg,
+    source_subcomponent: row.source_subcomponent,
+    target_subcomponent: row.target_subcomponent,
+    api_name: row.api_name
+}]->(target);
