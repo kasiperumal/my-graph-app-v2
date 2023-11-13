@@ -672,9 +672,13 @@ function Graph() {
         network.on('doubleClick', function (params) {
             console.log('double click');
             if (params.nodes.length > 0) {
-            const nodeId = params.nodes[0];
-            console.log(nodeId);
-            triggerComponent3SQuery(nodeId);
+                const nodeId = params.nodes[0];
+                console.log("nodeId:",nodeId);
+                const clickedNode = nodesArray.find(node => node.id === nodeId);
+                if (clickedNode) {
+                    sessionId = clickedNode.sessionId;
+                    triggerComponent3SQuery(sessionId);
+                }
             }
         });
     }
